@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "t3code-wal"
+version = "0.1.0"
+description = "Theme T3 Code from your wallpaper with pywal"
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "MIT" }
+dependencies = []
+
+[project.urls]
+Repository = "https://github.com/sabrehagen/t3code-wal"
+
+[project.scripts]
+t3code-wal = "t3code_wal:main"
+
+[tool.setuptools]
+py-modules = ["t3code_wal"]
