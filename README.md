@@ -10,14 +10,14 @@ When your wallpaper changes, open T3 Code windows repaint without a reload.
 
 ## Install
 
-Needs Python 3.8 or newer and nothing else. If you run pywal, you already have Python.
+It's one POSIX shell script. It needs `jq` and `awk`.
 
 ```sh
-pipx install git+https://github.com/sabrehagen/t3code-wal
-# or: uv tool install git+https://github.com/sabrehagen/t3code-wal
+curl -fsSL https://raw.githubusercontent.com/sabrehagen/t3code-wal/main/t3code-wal -o ~/.local/bin/t3code-wal
+chmod +x ~/.local/bin/t3code-wal
 ```
 
-Or run `t3code_wal.py` directly from a clone.
+Or copy `t3code-wal` from a clone to anywhere on your `PATH`.
 
 ## Use
 
@@ -91,7 +91,7 @@ cat ~/.cache/wal/sequences 2>/dev/null
 ## Development
 
 ```sh
-python3 -m unittest discover -s tests
+sh tests/run.sh
 ```
 
-`tests/palettes.json` holds real pywal output. Add a palette there if you find a wallpaper that themes badly.
+`tests/palettes.json` holds real pywal output and edge cases. Add a palette there if you find a wallpaper that themes badly.

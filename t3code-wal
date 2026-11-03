@@ -1,0 +1,425 @@
+#!/bin/sh
+# Publish a T3 Code theme generated from the current pywal colors. Needs jq and awk.
+
+set -eu
+
+usage() {
+  cat <<EOF
+usage: t3code-wal [--colors FILE] [--themes-dir DIR] [--stdout]
+
+  --colors FILE     pywal colors.json (default: $colors)
+  --themes-dir DIR  T3 Code themes directory (default: $themes_dir)
+  --stdout          print the theme instead of publishing it
+EOF
+}
+
+die() {
+  printf 't3code-wal: %s\n' "$1" >&2
+  exit 1
+}
+
+# Reads background, foreground, cursor and color0-15, one #rrggbb per line. POSIX awk only,
+# so no strtonum, and no apostrophes in this program. LC_ALL=C keeps the decimal point.
+generate() {
+  LC_ALL=C awk '
+    function min(a, b) { return a < b ? a : b }
+    function max(a, b) { return a > b ? a : b }
+    function abs(x) { return x < 0 ? -x : x }
+    function wrap_hue(x) { x = x % 360; return x < 0 ? x + 360 : x }
+    function hue_distance(a, b) { return abs(wrap_hue(a - b + 180) - 180) }
+
+    function channel(color, i) {
+      return (index(HEX, substr(color, 2 * i, 1)) - 1) * 16 + index(HEX, substr(color, 2 * i + 1, 1)) - 1
+    }
+
+    # %.0f rounds; %x alone would truncate.
+    function hex_byte(x) { return sprintf("%02x", sprintf("%.0f", min(255, max(0, x))) + 0) }
+
+    function to_linear(value) {
+      value /= 255
+      return value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ^ 2.4
+    }
+
+    function to_srgb(c) {
+      c = min(1, max(0, c))
+      return 255 * (c <= 0.0031308 ? c * 12.92 : 1.055 * c ^ (1 / 2.4) - 0.055)
+    }
+
+    # Awk functions return one value, so this leaves its result in ok_L, ok_C and ok_h.
+    function parse(color,   r, g, b, l, m, s, A, B) {
+      r = to_linear(channel(color, 1)); g = to_linear(channel(color, 2)); b = to_linear(channel(color, 3))
+      l = (0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b) ^ (1 / 3)
+      m = (0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b) ^ (1 / 3)
+      s = (0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b) ^ (1 / 3)
+      ok_L = 0.2104542553 * l + 0.793617785 * m - 0.0040720468 * s
+      A = 1.9779984951 * l - 2.428592205 * m + 0.4505937099 * s
+      B = 0.0259040371 * l + 0.7827717662 * m - 0.808675766 * s
+      ok_C = sqrt(A * A + B * B)
+      ok_h = wrap_hue(atan2(B, A) * (180 / PI))
+    }
+    function chroma_of(color) { parse(color); return ok_C }
+    function hue_of(color) { parse(color); return ok_h }
+
+    function to_rgb_linear(L, C, h,   radians, A, B, l, m, s) {
+      radians = h * (PI / 180)
+      A = C * cos(radians); B = C * sin(radians)
+      l = L + 0.3963377774 * A + 0.2158037573 * B; l = l * l * l
+      m = L - 0.1055613458 * A - 0.0638541728 * B; m = m * m * m
+      s = L - 0.0894841775 * A - 1.291485548 * B; s = s * s * s
+      linear_r = 4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s
+      linear_g = -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s
+      linear_b = -0.0041960863 * l - 0.7034186147 * m + 1.707614701 * s
+    }
+
+    function in_gamut(L, C, h) {
+      to_rgb_linear(L, C, h)
+      return linear_r >= -0.0001 && linear_r <= 1.0001 && linear_g >= -0.0001 && linear_g <= 1.0001 && linear_b >= -0.0001 && linear_b <= 1.0001
+    }
+
+    # Reduces chroma, never lightness or hue, until the color fits in sRGB.
+    function to_hex(L, C, h,   low, high, mid, i) {
+      L = min(1, max(0, L))
+      if (!in_gamut(L, C, h)) {
+        low = 0; high = C
+        for (i = 0; i < 20; i++) {
+          mid = (low + high) / 2
+          if (in_gamut(L, mid, h)) low = mid; else high = mid
+        }
+        C = low
+      }
+      to_rgb_linear(L, C, h)
+      return "#" hex_byte(to_srgb(linear_r)) hex_byte(to_srgb(linear_g)) hex_byte(to_srgb(linear_b))
+    }
+
+    function luminance(color) {
+      return 0.2126 * to_linear(channel(color, 1)) + 0.7152 * to_linear(channel(color, 2)) + 0.0722 * to_linear(channel(color, 3))
+    }
+
+    function contrast(first, second,   a, b) {
+      a = luminance(first); b = luminance(second)
+      return (max(a, b) + 0.05) / (min(a, b) + 0.05)
+    }
+
+    function mix(base, overlay, amount,   i, a, result) {
+      result = "#"
+      for (i = 1; i <= 3; i++) {
+        a = channel(base, i)
+        result = result hex_byte(a + (channel(overlay, i) - a) * amount)
+      }
+      return result
+    }
+
+    # Surfaces are space-separated, as awk cannot pass an array literal.
+    function worst(color, surfaces,   list, n, i, lowest) {
+      n = split(surfaces, list, " ")
+      lowest = contrast(color, list[1])
+      for (i = 2; i <= n; i++) lowest = min(lowest, contrast(color, list[i]))
+      return lowest
+    }
+
+    # Bisects lightness, measuring the 8-bit color that will actually be painted.
+    function solve_towards(color, surfaces, minimum, target,   L, C, h, near, far, mid, candidate, best, i) {
+      parse(color)
+      L = ok_L; C = ok_C; h = ok_h
+      best = ""
+      near = L; far = target
+      for (i = 0; i < 24; i++) {
+        mid = (near + far) / 2
+        candidate = to_hex(mid, C, h)
+        if (worst(candidate, surfaces) >= minimum) { best = candidate; far = mid } else near = mid
+      }
+      if (best != "") return best
+      candidate = to_hex(target, C, h)
+      return worst(candidate, surfaces) >= minimum ? candidate : ""
+    }
+
+    # Moves only lightness, so a color too dim on a surface keeps its hue.
+    function readable(color, surfaces, minimum,   list, surface_is_dark, solved) {
+      if (worst(color, surfaces) >= minimum) return color
+      split(surfaces, list, " ")
+      # Moving away from the surfaces is what normally helps. Mid-tone surfaces can
+      # require the other direction, and only black or white can meet some targets.
+      surface_is_dark = luminance(list[1]) < DARK_LUMINANCE
+      solved = solve_towards(color, surfaces, minimum, surface_is_dark ? 1 : 0)
+      if (solved == "") solved = solve_towards(color, surfaces, minimum, surface_is_dark ? 0 : 1)
+      if (solved != "") return solved
+      return worst("#ffffff", surfaces) > worst("#000000", surfaces) ? "#ffffff" : "#000000"
+    }
+
+    function meets(color, requirements,   list, n, i) {
+      n = split(requirements, list, " ")
+      for (i = 1; i < n; i += 2) if (contrast(color, list[i]) < list[i + 1] + 0) return 0
+      return 1
+    }
+
+    # The furthest mix toward a surface that still meets every "surface ratio" pair.
+    function soften(foreground_color, toward, requirements,   best, low, high, mid, candidate, i) {
+      best = foreground_color
+      low = 0; high = 1
+      for (i = 0; i < 16; i++) {
+        mid = (low + high) / 2
+        candidate = mix(foreground_color, toward, mid)
+        if (meets(candidate, requirements)) { best = candidate; low = mid } else high = mid
+      }
+      return best
+    }
+
+    # The first preferred color that already reads, else the closest one made readable.
+    function foreground_on(surface_color, preferences,   list, n, i, best) {
+      n = split(preferences, list, " ")
+      for (i = 1; i <= n; i++) if (contrast(list[i], surface_color) >= 4.5) return list[i]
+      best = list[1]
+      for (i = 2; i <= n; i++) if (contrast(list[i], surface_color) > contrast(best, surface_color)) best = list[i]
+      return readable(best, surface_color, 4.5)
+    }
+
+    # color5 is the accent, as in vscode-wal, unless it is gray or collides with a status
+    # hue, where primary buttons would read as an alarm.
+    function choose_accent(   order, i, candidate, first) {
+      split("5 4 6 3 2 1", order, " ")
+      first = ""
+      for (i = 1; i <= 6; i++) {
+        candidate = slots[order[i] + 0]
+        parse(candidate)
+        if (ok_C < MIN_ACCENT_CHROMA) continue
+        if (first == "") first = candidate
+        if (hue_distance(ok_h, ERROR_HUE) >= MIN_STATUS_HUE_DISTANCE && hue_distance(ok_h, WARNING_HUE) >= MIN_STATUS_HUE_DISTANCE) return candidate
+      }
+      return first != "" ? first : slots[5]
+    }
+
+    # Leans a semantic color toward the palette without changing what it means.
+    function semantic(name,   L, C, h, delta, shift) {
+      parse(native[name])
+      L = ok_L; C = ok_C; h = ok_h
+      if (accent_C >= MIN_ACCENT_CHROMA) {
+        delta = wrap_hue(accent_h - h + 180) - 180
+        shift = min(abs(delta) / 2, MAX_HUE_SHIFT)
+        h += delta < 0 ? -shift : shift
+      }
+      return to_hex(L, C * chroma_scale, wrap_hue(h))
+    }
+
+    # A step away from the canvas. vscode-wal ladder: menus 10, hover 16, border 28.
+    function step(units, C, h) {
+      return to_hex(min(0.98, max(0, canvas_L + direction * units * LADDER_UNIT)), C, h)
+    }
+    function rise(units) { return step(units, tint_chroma, neutral_hue) }
+    # A step that also says "selected" or "yours", so it carries the accent hue.
+    function tinted(units) { return step(units, max(tint_chroma, min(0.11, accent_C * 0.5)), accent_h) }
+    function on(surfaces) { return readable(text, surfaces, 4.6) }
+
+    function role(name, value) {
+      printf "%s    \"%s\": \"%s\"", role_separator, name, value
+      role_separator = ",\n"
+    }
+
+    function status_roles(name,   fill, tint) {
+      fill = readable(semantic(name), background, 3)
+      tint = mix(background, fill, status_mix)
+      role(name, fill)
+      role(name "Foreground", readable(semantic(name "Foreground"), tint, 4.6))
+      role(name "Surface", tint)
+    }
+
+    BEGIN {
+      HEX = "0123456789abcdef"
+      PI = atan2(0, -1)
+      # T3 Code dividing line between dark and light canvases.
+      DARK_LUMINANCE = 0.179
+      # One unit is roughly one step of vscode-wal shadeColor (an RGB offset) on a dark
+      # background, so the ladder reads in the same numbers, but stays perceptually even.
+      LADDER_UNIT = 0.0043
+      # Small enough that red stays red and amber stays amber, on any wallpaper hue.
+      MAX_HUE_SHIFT = 10
+      MIN_ACCENT_CHROMA = 0.04
+      MIN_STATUS_HUE_DISTANCE = 20
+      ERROR_HUE = hue_of("#fb414a")
+      WARNING_HUE = hue_of("#fe9a00")
+    }
+
+    { palette[NR] = $0 }
+
+    END {
+      background = palette[1]; foreground = palette[2]; cursor = palette[3]
+      for (i = 0; i < 16; i++) slots[i] = palette[i + 4]
+
+      dark = luminance(background) < DARK_LUMINANCE
+      direction = dark ? 1 : -1
+      status_mix = dark ? 0.16 : 0.08
+
+      # T3 Code native status colors. These carry meaning a wallpaper cannot supply: pywal
+      # slots are sorted clusters, so color1 is not red and may be the same purple as color5.
+      native["warning"] = "#fe9a00"
+      native["searchMatchActive"] = "#eea52b"
+      if (dark) {
+        native["error"] = "#fb414a"; native["errorForeground"] = "#ff6467"
+        native["warningForeground"] = "#ffb900"; native["searchMatch"] = "#8c6c1f"
+      } else {
+        native["error"] = "#fb2c36"; native["errorForeground"] = "#c10007"
+        native["warningForeground"] = "#bb4d00"; native["searchMatch"] = "#ffde8b"
+      }
+
+      parse(background)
+      canvas_L = ok_L; canvas_C = ok_C; canvas_h = ok_h
+      raw_accent = choose_accent()
+      parse(raw_accent)
+      accent_C = ok_C; accent_h = ok_h
+      palette_chroma = 0
+      for (i = 1; i <= 6; i++) palette_chroma = max(palette_chroma, chroma_of(slots[i]))
+      chroma_scale = min(1, max(0.7, palette_chroma / 0.15))
+
+      # A gray wallpaper stays gray: the tint comes only from color the palette has.
+      # The same chroma that is subtle on a dark surface is loud on a light one.
+      tint_chroma = max(min(canvas_C, 0.06), min(dark ? 0.045 : 0.02, accent_C * 0.22))
+      neutral_hue = canvas_C >= 0.01 ? canvas_h : accent_h
+
+      surface = rise(6)
+      surface_raised = rise(8)
+      surface_overlay = rise(10)
+      secondary = rise(12)
+      muted = rise(8)
+      accent_surface = rise(20)
+      message_surface = tinted(22)
+      # T3 Code sidebar recedes behind the canvas in both of its native palettes.
+      sidebar = to_hex(max(0, canvas_L - 0.02), canvas_C, canvas_h)
+      row_hover = tinted(14); row_active = tinted(20); row_selected = tinted(26)
+      update_surface = mix(background, raw_accent, status_mix)
+
+      text = readable(foreground, background " " surface_overlay, 7)
+      muted_text = soften(text, background, background " " (dark ? 5.082 : 4.705) " " surface_overlay " 4.6")
+
+      accent = readable(raw_accent, background " " surface_raised, 3)
+      focus = readable(chroma_of(slots[12]) >= MIN_ACCENT_CHROMA ? slots[12] : accent, background " " surface_raised, 3)
+      action_foreground = foreground_on(accent, background " " text)
+      # vscode-wal button.hoverBackground is color5 shaded by +12, always lighter. Moving
+      # away from the label instead keeps one label readable on both button states.
+      away_from_label = luminance(accent) >= luminance(action_foreground) ? 1 : -1
+      parse(accent)
+      accent_hover = to_hex(ok_L + away_from_label * 12 * LADDER_UNIT, ok_C, ok_h)
+
+      search_match = semantic("searchMatch")
+      search_active = semantic("searchMatchActive")
+
+      # A role missing here is derived by T3 Code from the canvas and accent seeds, so a
+      # newer T3 Code stays on-palette.
+      printf "{\n  \"version\": 1,\n  \"name\": \"Wal\",\n  \"appearance\": \"%s\",\n", dark ? "dark" : "light"
+      printf "  \"canvas\": \"%s\",\n  \"accent\": \"%s\",\n  \"colors\": {\n", background, raw_accent
+      role("canvas", background)
+      role("chrome", background)
+      role("toolbar", background)
+      role("toolbarForeground", text)
+      role("toolbarBorder", rise(28))
+      role("toolbarControl", rise(10))
+      role("toolbarControlForeground", on(rise(10) " " rise(16)))
+      role("toolbarControlHover", rise(16))
+      role("surface", surface)
+      role("surfaceRaised", surface_raised)
+      role("surfaceOverlay", surface_overlay)
+      role("text", text)
+      role("textMuted", muted_text)
+      role("border", rise(28))
+      role("input", rise(34))
+      role("focus", focus)
+      role("accent", accent)
+      role("accentForeground", action_foreground)
+      role("secondary", secondary)
+      role("secondaryForeground", on(secondary))
+      role("muted", muted)
+      role("mutedForeground", soften(text, muted, muted " 4.6 " surface_overlay " 4.6"))
+      role("placeholder", soften(text, surface_raised, surface_raised " 4.6"))
+      role("secondaryLabel", muted_text)
+      role("iconMuted", muted_text)
+      status_roles("error")
+      status_roles("warning")
+      role("update", accent)
+      role("updateForeground", readable(accent, update_surface, 4.6))
+      role("updateSurface", update_surface)
+      role("accentSurface", accent_surface)
+      role("accentSurfaceForeground", on(accent_surface))
+      role("messageSurface", message_surface)
+      role("messageForeground", on(message_surface))
+      role("messageAction", accent)
+      role("messageActionForeground", action_foreground)
+      role("messageActionHover", accent_hover)
+      role("codeBackground", surface)
+      role("codeForeground", on(surface))
+      role("searchMatchBackground", search_match)
+      role("searchMatchForeground", foreground_on(search_match, text " " background))
+      role("searchMatchActiveBackground", search_active)
+      role("searchMatchActiveForeground", foreground_on(search_active, background " " text))
+      role("sidebar", sidebar)
+      role("sidebarForeground", on(sidebar " " row_selected))
+      role("sidebarMutedForeground", soften(text, sidebar, sidebar " 5.5 " row_selected " 4.6"))
+      role("sidebarControlSurface", rise(6))
+      role("sidebarRowHover", row_hover)
+      role("sidebarRowActive", row_active)
+      role("sidebarRowSelected", row_selected)
+      role("sidebarBorder", rise(24))
+      role("terminalBackground", background)
+      role("terminalForeground", readable(foreground, background, 7))
+      role("terminalCursor", readable(cursor, background, 3))
+      role("terminalSelection", tinted(40))
+      role("terminalScrollbar", rise(24))
+      role("terminalScrollbarHover", rise(36))
+      printf "\n  }\n}\n"
+    }
+  '
+}
+
+colors=${PYWAL_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/wal}/colors.json
+themes_dir=${T3CODE_HOME:-$HOME/.t3}/userdata/themes
+to_stdout=
+
+while [ $# -gt 0 ]; do
+  case $1 in
+    --colors | --themes-dir)
+      if [ $# -lt 2 ]; then
+        usage >&2
+        exit 2
+      fi
+      if [ "$1" = --colors ]; then colors=$2; else themes_dir=$2; fi
+      shift 2
+      ;;
+    --stdout)
+      to_stdout=1
+      shift
+      ;;
+    -h | --help)
+      usage
+      exit 0
+      ;;
+    *)
+      usage >&2
+      exit 2
+      ;;
+  esac
+done
+
+command -v jq >/dev/null || die 'needs jq'
+[ -r "$colors" ] || die "cannot read $colors. Run wal first."
+
+palette=$(jq -r '
+  [.special.background, .special.foreground, .special.cursor // .special.foreground, .colors["color\(range(16))"]]
+  | if all(type == "string" and test("^#[0-9a-fA-F]{6}\\z")) then .[] | ascii_downcase else error end
+' "$colors" 2>/dev/null) || die "$colors is not a complete pywal palette"
+
+theme=$(printf '%s\n' "$palette" | generate)
+
+if [ -n "$to_stdout" ]; then
+  printf '%s\n' "$theme"
+  exit 0
+fi
+
+# T3 Code watches this directory and repaints when wal.json is renamed into place. The
+# server ignores non-.json names, and refuses symlinks, so this must be a real file.
+temporary=$themes_dir/.wal.$$.tmp
+trap 'rm -f "$temporary"' EXIT
+trap 'exit 1' HUP INT TERM
+{
+  mkdir -p "$themes_dir" &&
+    printf '%s\n' "$theme" >"$temporary" &&
+    chmod 644 "$temporary" &&
+    mv -f "$temporary" "$themes_dir/wal.json"
+} || die "cannot write to $themes_dir"
+printf '%s\n' "$themes_dir/wal.json"
