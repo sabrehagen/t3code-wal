@@ -5,11 +5,15 @@ set -eu
 
 usage() {
   cat <<EOF
-usage: t3code-wal [--colors FILE] [--themes-dir DIR] [--stdout]
+usage: t3code-wal [--colors FILE] [--base-dir DIR]... [--themes-dir DIR]... [--stdout]
 
   --colors FILE     pywal colors.json (default: $colors)
-  --themes-dir DIR  T3 Code themes directory (default: $themes_dir)
+  --base-dir DIR    a T3 Code server's base directory, as given to t3 serve --base-dir
+                    (default: $base_dir)
+  --themes-dir DIR  a T3 Code themes directory, used as is
   --stdout          print the theme instead of publishing it
+
+Repeat --base-dir and --themes-dir to publish to several servers.
 EOF
 }
 
@@ -368,17 +372,32 @@ generate() {
 }
 
 colors=${PYWAL_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/wal}/colors.json
-themes_dir=${T3CODE_HOME:-$HOME/.t3}/userdata/themes
+base_dir=${T3CODE_HOME:-$HOME/.t3}
+themes_dirs=
 to_stdout=
+
+# One themes directory per line, so a run can publish to every server on the machine.
+add_themes_dir() {
+  case $1 in
+    '' | *'
+'*) die "invalid directory: '$1'" ;;
+  esac
+  themes_dirs="$themes_dirs$1
+"
+}
 
 while [ $# -gt 0 ]; do
   case $1 in
-    --colors | --themes-dir)
+    --colors | --base-dir | --themes-dir)
       if [ $# -lt 2 ]; then
         usage >&2
         exit 2
       fi
-      if [ "$1" = --colors ]; then colors=$2; else themes_dir=$2; fi
+      case $1 in
+        --colors) colors=$2 ;;
+        --base-dir) add_themes_dir "${2:+$2/userdata/themes}" ;;
+        --themes-dir) add_themes_dir "$2" ;;
+      esac
       shift 2
       ;;
     --stdout)
@@ -411,15 +430,29 @@ if [ -n "$to_stdout" ]; then
   exit 0
 fi
 
+[ -n "$themes_dirs" ] || add_themes_dir "$base_dir/userdata/themes"
+
 # T3 Code watches this directory and repaints when wal.json is renamed into place. The
-# server ignores non-.json names, and refuses symlinks, so this must be a real file.
-temporary=$themes_dir/.wal.$$.tmp
+# server ignores non-.json names, and refuses symlinks, so this must be a real file. One
+# unwritable directory doesn't stop the others from being themed.
+temporary=
+failed=
 trap 'rm -f "$temporary"' EXIT
 trap 'exit 1' HUP INT TERM
-{
-  mkdir -p "$themes_dir" &&
+set -f
+IFS='
+'
+for themes_dir in $themes_dirs; do
+  temporary=$themes_dir/.wal.$$.tmp
+  if mkdir -p "$themes_dir" &&
     printf '%s\n' "$theme" >"$temporary" &&
     chmod 644 "$temporary" &&
-    mv -f "$temporary" "$themes_dir/wal.json"
-} || die "cannot write to $themes_dir"
-printf '%s\n' "$themes_dir/wal.json"
+    mv -f "$temporary" "$themes_dir/wal.json"; then
+    printf '%s\n' "$themes_dir/wal.json"
+  else
+    rm -f "$temporary"
+    printf 't3code-wal: cannot write to %s\n' "$themes_dir" >&2
+    failed=1
+  fi
+done
+[ -z "$failed" ]

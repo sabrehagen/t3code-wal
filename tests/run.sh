@@ -74,6 +74,11 @@ if [ ! -f "$themes/wal.json" ] || [ -L "$themes/wal.json" ]; then fail 'wal.json
 [ "$(wc -c <"$themes/wal.json")" -le 32768 ] || fail 'wal.json is over the 32KB server limit'
 [ "$(jq -r .appearance "$themes/wal.json")" = light ] || fail 'wal.json was not replaced'
 
+# Each --base-dir is published to.
+"$tool" --colors "$work/palette.json" --base-dir "$work/one" --base-dir "$work/two" >/dev/null
+[ -f "$work/one/userdata/themes/wal.json" ] && [ -f "$work/two/userdata/themes/wal.json" ] ||
+  fail 'not published to every --base-dir'
+
 # The defaults follow the environment.
 mkdir "$work/cache"
 cp "$work/palette.json" "$work/cache/colors.json"

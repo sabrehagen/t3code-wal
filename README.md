@@ -32,19 +32,51 @@ chmod +x ~/.local/bin/t3code-wal
 
 From then on, each wallpaper change repaints open T3 Code windows without a reload.
 
+If you start your server with `t3 serve --base-dir`, see [A server with its own base directory](#a-server-with-its-own-base-directory).
+
 ## Options
 
-| Flag                 | What it does                          | Default                                                  |
-| -------------------- | ------------------------------------- | -------------------------------------------------------- |
-| `--colors FILE`      | The pywal palette to read             | `~/.cache/wal/colors.json`, honoring pywal's environment |
-| `--themes-dir DIR`   | The T3 Code themes directory to write | `~/.t3/userdata/themes`, or under `$T3CODE_HOME`         |
-| `--stdout`           | Print the theme instead of publishing |                                                          |
+| Flag               | What it does                                                             | Default                                                  |
+| ------------------ | ------------------------------------------------------------------------ | -------------------------------------------------------- |
+| `--colors FILE`    | The pywal palette to read                                                | `~/.cache/wal/colors.json`, honoring pywal's environment |
+| `--base-dir DIR`   | A T3 Code server's base directory, as given to `t3 serve --base-dir`     | `$T3CODE_HOME`, or `~/.t3`                               |
+| `--themes-dir DIR` | A T3 Code themes directory, used as is                                   |                                                          |
+| `--stdout`         | Print the theme instead of publishing                                    |                                                          |
+
+Repeat `--base-dir` and `--themes-dir` to publish to several servers in one run. If a directory can't be written, the others are still themed and `t3code-wal` exits with an error.
 
 ## Where it works
 
 Run `t3code-wal` on the machine running the T3 Code server. The theme reaches the desktop app's main local environment and any browser using the web app that server serves.
 
 app.t3.codes, additional connections and the mobile app don't use published themes.
+
+### A server with its own base directory
+
+A server publishes the themes in `userdata/themes` under its base directory. That's `~/.t3` unless the server was started with `t3 serve --base-dir DIR` or `T3CODE_HOME=DIR`. Pass the same directory to `t3code-wal`:
+
+```sh
+wal -i ~/wallpapers && t3code-wal --base-dir ~/.t3-server
+```
+
+Only the server your T3 Code client connects to needs the theme. If you run several servers, for example the desktop app's local environment as well as a standalone server, repeat the flag:
+
+```sh
+wal -i ~/wallpapers && t3code-wal --base-dir ~/.t3-server --base-dir ~/.t3-desktop
+```
+
+`wal -o` runs a command without arguments, so set the directory in the environment instead. This reaches one server:
+
+```sh
+T3CODE_HOME=~/.t3-server wal -i ~/wallpapers -o t3code-wal
+```
+
+Point `t3 theme` at the same server to check what it publishes and to select the theme:
+
+```sh
+t3 theme show --base-dir ~/.t3-server   # Published themes: wal.
+t3 theme set wal --base-dir ~/.t3-server
+```
 
 ## What isn't themed
 
